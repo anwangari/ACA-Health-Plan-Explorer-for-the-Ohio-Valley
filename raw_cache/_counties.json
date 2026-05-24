@@ -82,35 +82,5 @@
     "county_name": "Wayne County",
     "state": "WV",
     "zipcode": "25701"
-  },
-  {
-    "county_fips": "51760",
-    "county_name": "Richmond City",
-    "state": "VA",
-    "zipcode": "23219"
-  },
-  {
-    "county_fips": "51630",
-    "county_name": "Fredericksburg City",
-    "state": "VA",
-    "zipcode": "22401"
-  },
-  {
-    "county_fips": "51177",
-    "county_name": "Spotsylvania County",
-    "state": "VA",
-    "zipcode": "22401"
-  },
-  {
-    "county_fips": "51179",
-    "county_name": "Stafford County",
-    "state": "VA",
-    "zipcode": "22401"
-  },
-  {
-    "county_fips": "51770",
-    "county_name": "Roanoke City",
-    "state": "VA",
-    "zipcode": "24016"
   }
 ]
