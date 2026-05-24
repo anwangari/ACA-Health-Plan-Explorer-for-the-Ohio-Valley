@@ -61,7 +61,6 @@ TARGET_ZIPS = {
     "OH": ["45202", "43215", "44114"],   # Cincinnati, Columbus, Cleveland
     "TN": ["37201", "37402", "37902"],   # Nashville, Chattanooga, Knoxville
     "WV": ["25301", "26501", "25701"],   # Charleston, Morgantown, Huntington
-    "VA": ["23219", "22401", "24016"],   # Richmond, Fredericksburg, Roanoke
 }
 
 # Standardized household profiles. Keeping a fixed set means a premium
