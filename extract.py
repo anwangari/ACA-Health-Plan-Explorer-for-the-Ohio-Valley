@@ -1,7 +1,7 @@
 """
 extract.py
 ==========
-Extraction layer for the ACA Marketplace project (MSBA 692).
+Extraction layer for the ACA Marketplace project.
 
 Pulls plan data from the CMS Marketplace API for a set of zip codes across
 the Ohio Valley region, using a small set of standardized household profiles

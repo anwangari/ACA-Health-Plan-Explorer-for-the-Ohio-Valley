@@ -1,7 +1,7 @@
 """
 transform.py
 ============
-Transformation layer for the ACA Marketplace project (MSBA 692).
+Transformation layer for the ACA Marketplace project.
 
 Reads the raw JSON responses saved by extract.py, flattens the nested plan
 data into tidy tables, and writes each table to Parquet.

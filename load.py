@@ -1,7 +1,7 @@
 """
 load.py
 =======
-Load layer for the ACA Marketplace project (MSBA 692).
+Load layer for the ACA Marketplace project.
 
 Reads the tidy Parquet tables produced by transform.py and loads them into a
 relational database (PostgreSQL in production) using SQLAlchemy. The schema
