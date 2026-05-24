@@ -115,12 +115,22 @@ def _request(method, path, *, params=None, json_body=None):
             resp = requests.request(
                 method, url, params=params, json=json_body, timeout=30
             )
-            # 429 = rate limited. Back off and retry.
+
+            # Rate limited — back off and retry.
             if resp.status_code == 429:
                 wait = 2 ** attempt
                 log.warning("Rate limited. Waiting %ss before retry.", wait)
                 time.sleep(wait)
                 continue
+
+            # Client error — log what the API actually said, and DON'T retry
+            # a 400 (a malformed request won't fix itself by repeating).
+            if 400 <= resp.status_code < 500:
+                log.error("HTTP %d on %s — API response: %s",
+                          resp.status_code, path, resp.text[:600])
+                if resp.status_code == 400:
+                    return None
+
             resp.raise_for_status()
             time.sleep(REQUEST_DELAY)
             return resp.json()
