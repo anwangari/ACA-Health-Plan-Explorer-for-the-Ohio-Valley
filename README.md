@@ -67,7 +67,7 @@ at the center (grain: one row per plan × county × profile); `counties`,
 keys are enforced in PostgreSQL. 
 
 ## ER Diagram
-![ER Diagram from postgres](docs\erd.png)
+![ER Diagram from postgres](docs/erd.png)
 
 ## Validation
 
