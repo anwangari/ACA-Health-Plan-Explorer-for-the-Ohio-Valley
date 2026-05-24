@@ -244,5 +244,42 @@ def main(database_url=DATABASE_URL, tidy_dir=TIDY_DIR):
     log.info("Load complete.")
 
 
-if __name__ == "__main__":
+def run_pipeline(skip_extract=False):
+    """
+    End-to-end orchestration: API -> Parquet -> DB -> validation.
+    Imports the other stages and runs them in order. Because extract.py and
+    transform.py guard their own main() behind __name__ == '__main__', importing
+    them here has no side effects until we explicitly call their main().
+    """
+    import extract
+    import transform
+    import validate
+
+    if not skip_extract:
+        log.info("STEP 1/4  Extracting from API ...")
+        extract.main()
+    else:
+        log.info("STEP 1/4  Skipping extract (using existing raw_cache).")
+
+    log.info("STEP 2/4  Transforming raw JSON -> Parquet ...")
+    transform.main()
+
+    log.info("STEP 3/4  Loading Parquet -> database ...")
     main()
+
+    log.info("STEP 4/4  Running data-quality validation ...")
+    ok = validate.main()
+    if not ok:
+        log.error("Pipeline finished but validation FAILED. Review results above.")
+        return False
+    log.info("Pipeline complete and validated.")
+    return True
+
+
+if __name__ == "__main__":
+    import sys
+    # `python load.py`            -> full pipeline including a fresh API pull
+    # `python load.py --no-extract`-> reuse cached JSON (faster reruns)
+    skip = "--no-extract" in sys.argv
+    success = run_pipeline(skip_extract=skip)
+    sys.exit(0 if success else 1)
