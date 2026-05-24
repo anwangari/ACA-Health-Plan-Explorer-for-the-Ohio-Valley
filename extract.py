@@ -52,6 +52,7 @@ CACHE_DIR.mkdir(exist_ok=True)
 # the limit in response headers; this keeps us well under it.
 REQUEST_DELAY = 0.5
 MAX_RETRIES = 3
+PAGE_SIZE = 100   # plans per page; API default is 10
 
 # Target zip codes — a few representative ones per state to start.
 # The script resolves these to county FIPS automatically; expand this list
@@ -174,23 +175,24 @@ def get_counties_for_zip(zipcode):
 
 def search_plans(county, profile):
     """
-    Search plans for one county + one household profile.
+    Search ALL plans for one county + one household profile, paging through
+    results until we've collected the full 'total' the API reports.
     Endpoint: POST /plans/search
-
-    Caches the raw response to disk and returns the parsed JSON.
     """
     cache_file = CACHE_DIR / f"plans_{county['county_fips']}_{profile['profile_id']}.json"
 
-    # Skip the call if we already have it cached.
+    # Smart cache check: only skip if the cached file already holds the full set.
     if cache_file.exists():
-        log.info("Cache hit: %s", cache_file.name)
-        return json.loads(cache_file.read_text())
+        cached = json.loads(cache_file.read_text())
+        got = len(cached.get("response", {}).get("plans", []))
+        total = cached.get("response", {}).get("total", got)
+        if got >= total:
+            log.info("Cache hit (complete): %s", cache_file.name)
+            return cached
+        log.info("Cache incomplete (%d/%d), refetching: %s", got, total, cache_file.name)
 
-    body = {
-        "household": {
-            "income": profile["income"],
-            "people": profile["people"],
-        },
+    base_body = {
+        "household": {"income": profile["income"], "people": profile["people"]},
         "market": MARKET,
         "place": {
             "countyfips": county["county_fips"],
@@ -200,12 +202,31 @@ def search_plans(county, profile):
         "year": PLAN_YEAR,
     }
 
-    data = _request("POST", "plans/search", json_body=body)
-    if data is None:
-        return None
+    all_plans = []
+    total = None
+    offset = 0
+    last_meta = {}
 
-    # Save raw response with a little metadata so the transform step knows
-    # which profile/county each plan came from.
+    while True:
+        body = dict(base_body, limit=PAGE_SIZE, offset=offset)
+        data = _request("POST", "plans/search", json_body=body)
+        if data is None:
+            break
+
+        page_plans = data.get("plans", [])
+        all_plans.extend(page_plans)
+
+        if total is None:
+            total = data.get("total", len(page_plans))
+        # keep the non-plan metadata (facets, ranges, rate_area) from page 1
+        if offset == 0:
+            last_meta = {k: v for k, v in data.items() if k != "plans"}
+
+        offset += len(page_plans)
+        # stop when we've collected everything or a page came back empty
+        if not page_plans or offset >= total:
+            break
+
     enriched = {
         "_meta": {
             "county_fips": county["county_fips"],
@@ -214,11 +235,10 @@ def search_plans(county, profile):
             "profile_id": profile["profile_id"],
             "plan_year": PLAN_YEAR,
         },
-        "response": data,
+        "response": {**last_meta, "total": total, "plans": all_plans},
     }
     cache_file.write_text(json.dumps(enriched, indent=2))
-    plan_count = len(data.get("plans", []))
-    log.info("Saved %d plans -> %s", plan_count, cache_file.name)
+    log.info("Saved %d/%s plans -> %s", len(all_plans), total, cache_file.name)
     return enriched
 
 
