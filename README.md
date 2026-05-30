@@ -59,6 +59,8 @@ Each stage can also run on its own: `python extract.py`, `python transform.py`,
 `python validate.py`. The run is **idempotent** — running it five times leaves
 the database in the same state.
 
+To launch the Dash dashboard, see **[Running the Dashboard Server](docs/dashboard.md)**.
+
 ## Data model
 
 Six tables, normalized to third normal form. `premium_quotes` is the fact table
