@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 notes.txt
+CLAUDE.md
 
 # Python build / cache / test artifacts
 __pycache__
