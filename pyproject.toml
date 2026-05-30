@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marketplace-lens"
+version = "0.2.0"
+description = "ACA Health Plan Explorer for the Ohio Valley — ETL pipeline + Dash dashboard"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Install in editable mode so `python -m marketplace` and the tests resolve the
+# package without juggling PYTHONPATH:
+#   pip install -e .
