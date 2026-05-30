@@ -4,4 +4,10 @@
 !.env.example
 notes.txt
 
+# Python build / cache / test artifacts
 __pycache__
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
