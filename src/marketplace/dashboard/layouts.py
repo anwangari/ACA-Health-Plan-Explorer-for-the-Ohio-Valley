@@ -49,7 +49,7 @@ def serve_layout():
     header = html.Div(
         className="py-2 border-bottom mb-2",
         children=html.Div([
-            html.H4("Marketplace Lens", className="fw-bold mb-0"),
+            html.H4("ACA Health Plan Explorer for the Ohio Valley", className="fw-bold mb-0"),
             html.Small("How does the cost of comparable ACA coverage vary across "
                        "the Ohio Valley \u2014 IN, OH, TN, WV?",
                        className="text-muted"),

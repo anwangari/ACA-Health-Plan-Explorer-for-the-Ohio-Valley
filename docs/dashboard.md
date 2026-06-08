@@ -14,7 +14,7 @@ A populated database (or the tidy Parquet files) must exist first. If you
 haven't run the pipeline yet:
 
 ```bash
-python -m marketplace                 # full pipeline (extract → … → validate)
+python -m marketplace                 # full pipeline (extract -> ... -> validate)
 python -m marketplace --no-extract    # reuse cached API responses
 ```
 
@@ -28,20 +28,47 @@ python src/marketplace/dashboard/app.py
 
 Then open http://127.0.0.1:8050.
 
+## Layout
+
+The page is a single 1200px-wide column:
+
+1. **Header** — title and the question the project answers.
+2. **Controls** — age, income (% FPL), county, and metal-level filters.
+3. **Five KPI cards** — plans available, median premium, cheapest Silver,
+   cheapest Silver after credit, and the best-value plan's estimated annual cost.
+4. **A 2x2 chart grid** — median premium by county, plans by metal level,
+   premium vs. deductible, and estimated annual cost.
+5. **Plan comparison table** — all plans for the selection, sortable.
+
 ## Using the app
 
 1. **Set the shopper profile.** Drag the **age** slider and choose an **income**
    band (% of the federal poverty level). The italic line beneath the controls
    confirms which stored profile your input mapped to — for example,
-   *"Showing the closest available profile: Age 45, 250% FPL (~$37,650/yr)."*
-   Income bands match what was loaded, so only age ever snaps.
-2. **Read the summary cards.** Plans available, median premium, cheapest Silver,
-   and issuer count update for the selected profile (and county, once chosen).
-3. **Pick a county** from the dropdown to focus every view on one market.
-4. **Filter metal levels** to narrow the plan comparison table.
-5. **Compare full vs. after-credit premiums** to see the subsidy's effect, and
-   **comparison by issuer** to see which carriers compete.
-6. **Sort the plan table** by clicking any column header.
+   *"Closest available profile: Age 45, 250% FPL (~$37,650/yr)."* Income bands
+   match what was loaded, so only age ever snaps. Every chart and card responds
+   to both age and income.
+2. **Read the cards.** Each shows a value and a one-line description of what it
+   means. They update for the selected profile and county.
+3. **Pick a county** to focus the supporting charts and the plan table on one
+   market. On the "Median premium by county" chart, your selection is
+   **highlighted** in context — all counties stay visible so you can see where
+   yours ranks.
+4. **Filter metal levels** to narrow every view (including the county chart's
+   medians) to the tiers you care about.
+5. **Find the best value.** The **premium vs. deductible** scatter plots each
+   plan as a dot (colored and shaped by metal level); plans toward the
+   bottom-left give the most coverage for the least cost. The **estimated annual
+   cost** chart ranks plans by `premium x 12 + deductible`, which often tells a
+   different story than premium alone — a cheap-premium plan with a big
+   deductible can be the worst annual value.
+6. **Sort the plan table** by clicking any column header. The table scrolls
+   horizontally within its card if needed, so it never overflows the page.
+
+> **Note on the annual-cost estimate.** It is illustrative: it assumes you meet
+> the plan's deductible over the year. Actual cost depends on the care you use.
+> The figure is built only from stored premium and deductible values — there is
+> no predictive model.
 
 > **Note on profiles.** The dashboard never calls the CMS API at runtime. It
 > reads pre-computed quotes for a fixed grid of profiles loaded by the pipeline,
@@ -76,7 +103,8 @@ if (Get-NetTCPConnection -State Listen -LocalPort 8050 -ErrorAction SilentlyCont
 
 > If you only `Stop-Process` the PID shown by `Get-NetTCPConnection`, the debug
 > reloader parent respawns the worker and the port stays bound. Killing by
-> command line (step 2) avoids that.
+> command line (step 2) avoids that. This matters when applying code changes:
+> if the old process keeps serving, you'll see stale behavior.
 
 ### Kill (macOS / Linux)
 
