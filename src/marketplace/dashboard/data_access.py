@@ -195,9 +195,10 @@ def kpi_summary(profile_id, county_fips=None):
 # View 1: median premium per county for a given profile
 # ---------------------------------------------------------------------------
 
-def premium_by_county(profile_id):
+def premium_by_county(profile_id, metal_levels=None):
     """
-    Median monthly premium per county for the given profile.
+    Median monthly premium per county for the given profile, optionally
+    narrowed to a subset of metal levels.
 
     One row per county_fips. The display label appends the state so that
     same-named counties in different states (e.g. Hamilton County, OH vs TN)
@@ -210,6 +211,10 @@ def premium_by_county(profile_id):
         return quotes
 
     q = quotes[quotes["profile_id"] == profile_id]
+    if metal_levels:
+        plan_df = _read_table("plans", plans)
+        keep_ids = plan_df[plan_df["metal_level"].isin(metal_levels)]["plan_id"]
+        q = q[q["plan_id"].isin(keep_ids)]
     agg = (
         q.groupby("county_fips", as_index=False)["monthly_premium"]
         .median()
@@ -385,3 +390,82 @@ def issuer_comparison(profile_id, county_fips=None, metal_levels=None):
     )
     agg["median_premium"] = pd.to_numeric(agg["median_premium"], errors="coerce")
     return agg.sort_values("plan_count", ascending=False)
+
+# ---------------------------------------------------------------------------
+# View 6: premium vs. deductible scatter (one dot per plan)
+# ---------------------------------------------------------------------------
+
+def plan_value_scatter(profile_id, county_fips, metal_levels=None):
+    """
+    One row per plan for the selected profile + county: after-credit premium
+    against individual deductible, plus metal level for color and the plan name
+    for hover. Both axes are clean stored numbers -- no modeling. Value plans
+    sit toward the low-premium, low-deductible corner.
+    """
+    cols = ["plan_name", "metal_level", "premium_after_credit",
+            "monthly_premium", "deductible_individual", "moop_individual"]
+    quotes = _coerce_numeric(_read_table("premium_quotes", premium_quotes))
+    plan_df = _read_table("plans", plans)
+    benefits = _coerce_numeric(_read_table("plan_benefits", plan_benefits))
+    if quotes.empty or plan_df.empty or not county_fips:
+        return pd.DataFrame(columns=cols)
+
+    q = quotes[(quotes["profile_id"] == profile_id) &
+               (quotes["county_fips"] == county_fips)]
+    out = (
+        q.merge(plan_df[["plan_id", "plan_name", "metal_level"]], on="plan_id", how="left")
+        .merge(benefits[["plan_id", "deductible_individual", "moop_individual"]],
+               on="plan_id", how="left")
+    )
+    if metal_levels:
+        out = out[out["metal_level"].isin(metal_levels)]
+    # Prefer after-credit premium on the axis; fall back to full if missing.
+    out["premium_after_credit"] = out["premium_after_credit"].fillna(out["monthly_premium"])
+    out = out.dropna(subset=["premium_after_credit", "deductible_individual"])
+    return out[[c for c in cols if c in out.columns]]
+
+
+# ---------------------------------------------------------------------------
+# View 7: estimated annual cost per plan (illustrative, assumption-based)
+# ---------------------------------------------------------------------------
+
+# Usage levels map to how much of the plan's OWN deductible/MOOP a shopper is
+# assumed to pay over a year. No actuarial model, no copay parsing -- just a
+# transparent assumption the user picks. "Moderate" = you meet the deductible;
+# "High" = you hit the out-of-pocket maximum.
+USAGE_LEVELS = {
+    "moderate": "Moderate use (meet the deductible)",
+    "high": "High use (reach the out-of-pocket max)",
+}
+
+
+def annual_cost_estimate(profile_id, county_fips, usage="moderate", metal_levels=None):
+    """
+    Estimated total annual cost per plan:
+        (premium_after_credit x 12) + assumed out-of-pocket
+    where assumed OOP is the plan's deductible (moderate) or MOOP (high).
+    Illustrative only -- actual cost depends on care used. Sorted cheapest first.
+    """
+    cols = ["plan_name", "metal_level", "annual_premium",
+            "assumed_oop", "annual_cost"]
+    base = plan_value_scatter(profile_id, county_fips, metal_levels)
+    if base.empty:
+        return pd.DataFrame(columns=cols)
+
+    df = base.copy()
+    df["annual_premium"] = df["premium_after_credit"] * 12
+    if usage == "high":
+        df["assumed_oop"] = df["moop_individual"]
+    else:  # moderate
+        df["assumed_oop"] = df["deductible_individual"]
+    df["assumed_oop"] = df["assumed_oop"].fillna(0)
+    df["annual_cost"] = df["annual_premium"] + df["assumed_oop"]
+    return df[cols].sort_values("annual_cost")
+
+
+def best_value_plan(profile_id, county_fips, usage="moderate", metal_levels=None):
+    """The single lowest estimated-annual-cost plan, as a dict (or {})."""
+    df = annual_cost_estimate(profile_id, county_fips, usage, metal_levels)
+    if df.empty:
+        return {}
+    return df.iloc[0].to_dict()
