@@ -16,7 +16,7 @@ log = get_logger("dashboard")
 
 
 def create_app():
-    app = Dash(__name__, title="Marketplace Lens",
+    app = Dash(__name__, title="ACA Health Plan Explorer for the Ohio Valley",
            external_stylesheets=[dbc.themes.FLATLY])
     app.layout = serve_layout          # callable -> re-evaluated each page load
     register_callbacks(app)

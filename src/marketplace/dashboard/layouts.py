@@ -6,8 +6,8 @@ Presentation only -- no data access logic and no callbacks. Component IDs
 declared here are wired up in callbacks.py.
 
 Structure, top to bottom:
-  header band -> controls (profile builder + county + metals) -> KPI cards
-  -> two charts side by side -> full-width plan comparison table.
+  header band -> controls (profile builder + county + metals) -> 5 KPI cards
+  -> two charts -> two more charts -> full-width plan comparison table.
 """
 
 import dash_bootstrap_components as dbc
@@ -71,7 +71,7 @@ def serve_layout():
             ], md=3),
             dbc.Col([
                 html.Label("County", className="fw-bold small"),
-                dcc.Dropdown(id="county-dropdown", placeholder="Pick a county"),
+                dcc.Dropdown(id="county-dropdown", placeholder="All counties"),
             ], md=3),
             dbc.Col([
                 html.Label("Metal levels", className="fw-bold small"),
@@ -81,13 +81,21 @@ def serve_layout():
         ]), className="shadow-sm mb-2"),
     )
 
-    snapped_note = html.P(id="snapped-profile", className="text-muted small fst-italic mb-4")
+    snapped_note = html.P(id="snapped-profile",
+                          className="text-muted small fst-italic mb-4")
 
+    # Five cards across; on md they wrap to a tidy grid.
     kpis = dbc.Row([
-        dbc.Col(_kpi_card("kpi-plans", "Plans available"), md=3, className="mb-3"),
-        dbc.Col(_kpi_card("kpi-median", "Median premium / mo"), md=3, className="mb-3"),
-        dbc.Col(_kpi_card("kpi-silver", "Cheapest Silver / mo"), md=3, className="mb-3"),
-        dbc.Col(_kpi_card("kpi-issuers", "Issuers"), md=3, className="mb-3"),
+        dbc.Col(_kpi_card("kpi-plans", "Plans available"),
+                md=6, lg=True, className="mb-3"),
+        dbc.Col(_kpi_card("kpi-median", "Median premium / mo"),
+                md=6, lg=True, className="mb-3"),
+        dbc.Col(_kpi_card("kpi-silver", "Cheapest Silver / mo"),
+                md=6, lg=True, className="mb-3"),
+        dbc.Col(_kpi_card("kpi-silver-credit", "Cheapest Silver / mo after credit"),
+                md=6, lg=True, className="mb-3"),
+        dbc.Col(_kpi_card("kpi-issuers", "Issuers"),
+                md=6, lg=True, className="mb-3"),
     ])
 
     charts = dbc.Row([
@@ -101,6 +109,21 @@ def serve_layout():
         ]), className="shadow-sm h-100"), md=6, className="mb-3"),
     ])
 
+    charts2 = dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H5("Full vs. after-credit premium", className="fw-bold"),
+            html.Div("How much the premium tax credit buys down the sticker "
+                     "price, by metal level.", className="text-muted small mb-2"),
+            dcc.Graph(id="credit-comparison", config={"displayModeBar": False}),
+        ]), className="shadow-sm h-100"), md=6, className="mb-3"),
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H5("Comparison by issuer", className="fw-bold"),
+            html.Div("Plans offered and median premium per insurer.",
+                     className="text-muted small mb-2"),
+            dcc.Graph(id="issuer-comparison", config={"displayModeBar": False}),
+        ]), className="shadow-sm h-100"), md=6, className="mb-3"),
+    ])
+
     table = dbc.Card(dbc.CardBody([
         html.H5("Plan comparison", className="fw-bold"),
         html.Div(id="plan-table"),
@@ -108,5 +131,6 @@ def serve_layout():
 
     return html.Div([
         header,
-        dbc.Container([controls, snapped_note, kpis, charts, table], fluid=False),
+        dbc.Container([controls, snapped_note, kpis, charts, charts2, table],
+                      fluid=False),
     ])

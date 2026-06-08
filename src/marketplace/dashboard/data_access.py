@@ -21,7 +21,7 @@ from sqlalchemy import create_engine, select
 from marketplace import config
 from marketplace.logging_setup import get_logger
 from marketplace.db.schema import (
-    counties, query_profiles, plans, plan_benefits, premium_quotes,
+    counties, query_profiles, plans, plan_benefits, premium_quotes, issuers,
 )
 
 log = get_logger("dashboard.data")
@@ -47,14 +47,31 @@ def _read_table(name, table):
     return _parquet(name)
 
 
+# Numeric columns that must never be treated as strings. Parquet/DB reads can
+# occasionally hand back object dtype (e.g. when a column has mixed NULLs);
+# coercing here guarantees medians, mins, and sorts are numeric everywhere.
+_NUMERIC_COLS = {
+    "monthly_premium", "premium_after_credit",
+    "deductible_individual", "deductible_family",
+    "moop_individual", "moop_family",
+}
+
+
+def _coerce_numeric(df):
+    """Force known numeric columns to real numbers; bad values -> NaN."""
+    for col in df.columns:
+        if col in _NUMERIC_COLS:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 # ---------------------------------------------------------------------------
 # Profile grid: bounds for the input controls + snap-to-nearest lookup
 # ---------------------------------------------------------------------------
 
 def profile_grid():
     """The stored profiles as a DataFrame (age, fpl_percent, income, id)."""
-    df = _read_table("query_profiles", query_profiles)
-    return df
+    return _read_table("query_profiles", query_profiles)
 
 
 def profile_bounds():
@@ -110,6 +127,19 @@ def list_metal_levels():
     return sorted(df["metal_level"].dropna().unique().tolist())
 
 
+def county_options(profile_id):
+    """
+    (value, label) pairs for the county dropdown, for a given profile.
+    Label is disambiguated by state so same-named counties stay distinct.
+    """
+    df = premium_by_county(profile_id)
+    if df.empty:
+        return []
+    df = df.sort_values("county_label")
+    return [{"label": r["county_label"], "value": r["county_fips"]}
+            for _, r in df.iterrows()]
+
+
 # ---------------------------------------------------------------------------
 # KPI summary metrics (react to selected profile + optional county)
 # ---------------------------------------------------------------------------
@@ -121,9 +151,11 @@ def kpi_summary(profile_id, county_fips=None):
 
     Returns a dict of display-ready strings so the cards stay presentation-only.
     """
-    quotes = _read_table("premium_quotes", premium_quotes)
+    blank = {"plans": "--", "median": "--", "cheapest_silver": "--",
+             "cheapest_silver_credit": "--", "issuers": "--"}
+
+    quotes = _coerce_numeric(_read_table("premium_quotes", premium_quotes))
     plan_df = _read_table("plans", plans)
-    blank = {"plans": "--", "median": "--", "cheapest_silver": "--", "issuers": "--"}
     if quotes.empty or plan_df.empty:
         return blank
 
@@ -143,13 +175,18 @@ def kpi_summary(profile_id, county_fips=None):
 
     silver = merged[merged["metal_level"] == "Silver"]
     cheapest_silver = silver["monthly_premium"].min() if not silver.empty else None
+    cheapest_silver_credit = (
+        silver["premium_after_credit"].min() if not silver.empty else None
+    )
+
+    def money(v):
+        return f"${v:,.0f}" if v is not None and pd.notnull(v) else "--"
 
     return {
         "plans": f"{n_plans:,}",
-        "median": f"${median_prem:,.0f}" if pd.notnull(median_prem) else "--",
-        "cheapest_silver": (f"${cheapest_silver:,.0f}"
-                            if cheapest_silver is not None and pd.notnull(cheapest_silver)
-                            else "--"),
+        "median": money(median_prem),
+        "cheapest_silver": money(cheapest_silver),
+        "cheapest_silver_credit": money(cheapest_silver_credit),
         "issuers": f"{n_issuers:,}",
     }
 
@@ -159,37 +196,76 @@ def kpi_summary(profile_id, county_fips=None):
 # ---------------------------------------------------------------------------
 
 def premium_by_county(profile_id):
-    quotes = _read_table("premium_quotes", premium_quotes)
+    """
+    Median monthly premium per county for the given profile.
+
+    One row per county_fips. The display label appends the state so that
+    same-named counties in different states (e.g. Hamilton County, OH vs TN)
+    never collapse onto a single bar. The label is built to be non-null and
+    unique even if a county_fips fails to match the geography table.
+    """
+    quotes = _coerce_numeric(_read_table("premium_quotes", premium_quotes))
     geo = _read_table("counties", counties)
     if quotes.empty:
         return quotes
 
     q = quotes[quotes["profile_id"] == profile_id]
     agg = (
-        q.groupby("county_fips")["monthly_premium"]
+        q.groupby("county_fips", as_index=False)["monthly_premium"]
         .median()
-        .reset_index(name="median_premium")
+        .rename(columns={"monthly_premium": "median_premium"})
     )
-    return agg.merge(geo, on="county_fips", how="left")
+    agg["median_premium"] = pd.to_numeric(agg["median_premium"], errors="coerce")
+
+    keep = ["county_fips", "county_name", "state"]
+    geo = geo[[c for c in keep if c in geo.columns]].drop_duplicates("county_fips")
+    out = agg.merge(geo, on="county_fips", how="left")
+
+    # Build a guaranteed non-null, unique label: "Name, ST". Fall back to the
+    # FIPS when name/state are missing so two unmatched rows can't merge.
+    name = out["county_name"].fillna("Unknown")
+    state = out["state"].fillna("")
+    out["county_label"] = [
+        (f"{n}, {s}" if s else f"{n} ({f})")
+        for n, s, f in zip(name, state, out["county_fips"])
+    ]
+    # If any labels still collide, disambiguate with the FIPS.
+    dup = out["county_label"].duplicated(keep=False)
+    out.loc[dup, "county_label"] = (
+        out.loc[dup, "county_label"] + " (" + out.loc[dup, "county_fips"] + ")"
+    )
+    return out
 
 
 # ---------------------------------------------------------------------------
-# View 2: metal-level distribution for a given profile
+# View 2: metal-level distribution (responds to profile, county, metal filter)
 # ---------------------------------------------------------------------------
 
-def metal_distribution(profile_id):
-    quotes = _read_table("premium_quotes", premium_quotes)
+def metal_distribution(profile_id, county_fips=None, metal_levels=None):
+    """
+    Plans available and median premium per metal level. Scoped to a profile,
+    optionally narrowed to a single county and to a subset of metal levels.
+    """
+    cols = ["metal_level", "plan_count", "median_premium"]
+    quotes = _coerce_numeric(_read_table("premium_quotes", premium_quotes))
     plan_df = _read_table("plans", plans)
     if quotes.empty or plan_df.empty:
-        return pd.DataFrame(columns=["metal_level", "plan_count", "median_premium"])
+        return pd.DataFrame(columns=cols)
 
     q = quotes[quotes["profile_id"] == profile_id]
+    if county_fips:
+        q = q[q["county_fips"] == county_fips]
+    if q.empty:
+        return pd.DataFrame(columns=cols)
+
     merged = q.merge(plan_df[["plan_id", "metal_level"]], on="plan_id", how="left")
+    if metal_levels:
+        merged = merged[merged["metal_level"].isin(metal_levels)]
+
     return (
-        merged.groupby("metal_level")
+        merged.groupby("metal_level", as_index=False)
         .agg(plan_count=("plan_id", "nunique"),
              median_premium=("monthly_premium", "median"))
-        .reset_index()
     )
 
 
@@ -198,9 +274,9 @@ def metal_distribution(profile_id):
 # ---------------------------------------------------------------------------
 
 def plan_comparison(profile_id, county_fips, metal_levels=None):
-    quotes = _read_table("premium_quotes", premium_quotes)
+    quotes = _coerce_numeric(_read_table("premium_quotes", premium_quotes))
     plan_df = _read_table("plans", plans)
-    benefits = _read_table("plan_benefits", plan_benefits)
+    benefits = _coerce_numeric(_read_table("plan_benefits", plan_benefits))
     if quotes.empty:
         return quotes
 
@@ -219,3 +295,93 @@ def plan_comparison(profile_id, county_fips, metal_levels=None):
     ]
     cols = [c for c in cols if c in out.columns]
     return out[cols].sort_values("monthly_premium")
+
+
+# ---------------------------------------------------------------------------
+# View 4: full vs. after-credit premium, by metal level
+# ---------------------------------------------------------------------------
+
+def premium_vs_credit(profile_id, county_fips=None, metal_levels=None):
+    """
+    Median full premium vs. median premium-after-credit, grouped by metal level.
+    Shows how much the advance premium tax credit buys down the sticker price.
+    Scoped to a county and/or metal subset when given.
+
+    Returns long-form rows (metal_level, kind, amount) ready for a grouped bar.
+    """
+    empty = pd.DataFrame(columns=["metal_level", "kind", "amount"])
+    quotes = _coerce_numeric(_read_table("premium_quotes", premium_quotes))
+    plan_df = _read_table("plans", plans)
+    if quotes.empty or plan_df.empty:
+        return empty
+
+    q = quotes[quotes["profile_id"] == profile_id]
+    if county_fips:
+        q = q[q["county_fips"] == county_fips]
+    if q.empty:
+        return empty
+
+    merged = q.merge(plan_df[["plan_id", "metal_level"]], on="plan_id", how="left")
+    if metal_levels:
+        merged = merged[merged["metal_level"].isin(metal_levels)]
+
+    agg = (
+        merged.groupby("metal_level", as_index=False)
+        .agg(full=("monthly_premium", "median"),
+             after_credit=("premium_after_credit", "median"))
+    )
+    long = agg.melt(
+        id_vars="metal_level",
+        value_vars=["full", "after_credit"],
+        var_name="kind", value_name="amount",
+    )
+    long["kind"] = long["kind"].map(
+        {"full": "Full premium", "after_credit": "After credit"}
+    )
+    return long
+
+
+# ---------------------------------------------------------------------------
+# View 5: plan offering and price by issuer
+# ---------------------------------------------------------------------------
+
+def issuer_comparison(profile_id, county_fips=None, metal_levels=None):
+    """
+    Per-issuer summary for the selected profile: how many distinct plans each
+    insurer offers and their median monthly premium. Scoped to a county and/or
+    metal subset when given. Sorted by plan count (widest offering first).
+    """
+    empty = pd.DataFrame(columns=["issuer_name", "plan_count", "median_premium"])
+    quotes = _coerce_numeric(_read_table("premium_quotes", premium_quotes))
+    plan_df = _read_table("plans", plans)
+    issuer_df = _read_table("issuers", issuers)
+    if quotes.empty or plan_df.empty:
+        return empty
+
+    q = quotes[quotes["profile_id"] == profile_id]
+    if county_fips:
+        q = q[q["county_fips"] == county_fips]
+    if q.empty:
+        return empty
+
+    merged = q.merge(
+        plan_df[["plan_id", "issuer_id", "metal_level"]], on="plan_id", how="left"
+    )
+    if metal_levels:
+        merged = merged[merged["metal_level"].isin(metal_levels)]
+
+    if not issuer_df.empty:
+        merged = merged.merge(
+            issuer_df[["issuer_id", "issuer_name"]], on="issuer_id", how="left"
+        )
+        merged["issuer_name"] = merged["issuer_name"].fillna(merged["issuer_id"])
+    else:
+        merged["issuer_name"] = merged["issuer_id"]
+
+    agg = (
+        merged.groupby("issuer_name", as_index=False)
+        .agg(plan_count=("plan_id", "nunique"),
+             median_premium=("monthly_premium", "median"))
+    )
+    agg["median_premium"] = pd.to_numeric(agg["median_premium"], errors="coerce")
+    return agg.sort_values("plan_count", ascending=False)

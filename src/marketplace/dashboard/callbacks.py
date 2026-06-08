@@ -4,13 +4,16 @@ callbacks.py
 Wires interactivity to the components declared in layouts.py. All data comes
 through data_access; this module only shapes it into figures/tables.
 
-The age slider + FPL dropdown are snapped to the nearest stored profile in
-data_access.nearest_profile_id; every downstream query uses that real
-profile_id, so the dashboard stays strictly read-only against the database.
+Filter independence:
+  The age slider + FPL dropdown snap to the nearest stored profile. Changing
+  them refreshes the county dropdown's OPTIONS (premiums are profile-specific),
+  but the user's current county SELECTION is preserved when that county still
+  exists for the new profile -- so adjusting age no longer resets the county.
+  Every chart reads age, FPL, county, and metal independently.
 """
 
 import plotly.express as px
-from dash import Input, Output, dash_table, html
+from dash import Input, Output, State, dash_table, html
 
 from marketplace.dashboard import data_access
 
@@ -25,7 +28,8 @@ _METAL_COLORS = {
 def _empty_fig(msg="No data for this selection"):
     fig = px.scatter()
     fig.update_layout(
-        annotations=[dict(text=msg, showarrow=False, font=dict(size=14, color="#7f8c8d"))],
+        annotations=[dict(text=msg, showarrow=False,
+                          font=dict(size=14, color="#7f8c8d"))],
         xaxis={"visible": False}, yaxis={"visible": False},
         margin=dict(l=10, r=10, t=10, b=10),
     )
@@ -34,7 +38,7 @@ def _empty_fig(msg="No data for this selection"):
 
 def register_callbacks(app):
 
-    # --- resolve the user's age/FPL to a real stored profile_id -------------
+    # --- resolve the user's age/FPL to a real stored profile_id ------------
     @app.callback(
         Output("snapped-profile", "children"),
         Input("age-slider", "value"),
@@ -44,31 +48,32 @@ def register_callbacks(app):
         _, row = data_access.nearest_profile_id(age, fpl)
         if not row:
             return "No profiles loaded."
-        return f"Showing the closest available profile: {data_access.profile_label(row)}"
+        return ("Showing the closest available profile: "
+                f"{data_access.profile_label(row)}")
 
-    # --- county dropdown options follow the selected profile ----------------
+    # --- county dropdown: refresh OPTIONS, PRESERVE current selection ------
     @app.callback(
         Output("county-dropdown", "options"),
         Output("county-dropdown", "value"),
         Input("age-slider", "value"),
         Input("fpl-dropdown", "value"),
+        State("county-dropdown", "value"),
     )
-    def _populate_counties(age, fpl):
+    def _populate_counties(age, fpl, current):
         profile_id, _ = data_access.nearest_profile_id(age, fpl)
-        df = data_access.premium_by_county(profile_id)
-        if df.empty:
-            return [], None
-        opts = [
-            {"label": f"{r['county_name']}, {r['state']}", "value": r["county_fips"]}
-            for _, r in df.sort_values("county_name").iterrows()
-        ]
-        return opts, opts[0]["value"] if opts else None
+        opts = data_access.county_options(profile_id)
+        valid_values = {o["value"] for o in opts}
+        # Keep the user's county if it still exists for this profile; otherwise
+        # leave it cleared (None = "All counties") rather than forcing one.
+        new_value = current if current in valid_values else None
+        return opts, new_value
 
-    # --- KPI cards ----------------------------------------------------------
+    # --- KPI cards ---------------------------------------------------------
     @app.callback(
         Output("kpi-plans", "children"),
         Output("kpi-median", "children"),
         Output("kpi-silver", "children"),
+        Output("kpi-silver-credit", "children"),
         Output("kpi-issuers", "children"),
         Input("age-slider", "value"),
         Input("fpl-dropdown", "value"),
@@ -77,9 +82,10 @@ def register_callbacks(app):
     def _kpis(age, fpl, county_fips):
         profile_id, _ = data_access.nearest_profile_id(age, fpl)
         k = data_access.kpi_summary(profile_id, county_fips)
-        return k["plans"], k["median"], k["cheapest_silver"], k["issuers"]
+        return (k["plans"], k["median"], k["cheapest_silver"],
+                k["cheapest_silver_credit"], k["issuers"])
 
-    # --- premium by county --------------------------------------------------
+    # --- median premium by county ------------------------------------------
     @app.callback(
         Output("premium-map", "figure"),
         Input("age-slider", "value"),
@@ -91,24 +97,30 @@ def register_callbacks(app):
         if df.empty:
             return _empty_fig()
         df = df.sort_values("median_premium")
+        # Pin category order so Plotly can't re-group or re-sort the bars.
+        order = df["county_label"].tolist()
         fig = px.bar(
-            df, x="median_premium", y="county_name", orientation="h",
-            labels={"median_premium": "Median monthly premium ($)", "county_name": ""},
+            df, x="median_premium", y="county_label", orientation="h",
+            category_orders={"county_label": order},
+            labels={"median_premium": "Median monthly premium ($)",
+                    "county_label": ""},
         )
         fig.update_traces(marker_color=_BAR_COLOR)
         fig.update_layout(margin=dict(l=10, r=10, t=10, b=10),
-                          plot_bgcolor="white", height=420)
+                          plot_bgcolor="white", height=460)
         return fig
 
-    # --- metal-level distribution ------------------------------------------
+    # --- plans available by metal level (responds to county + metal) -------
     @app.callback(
         Output("metal-distribution", "figure"),
         Input("age-slider", "value"),
         Input("fpl-dropdown", "value"),
+        Input("county-dropdown", "value"),
+        Input("metal-dropdown", "value"),
     )
-    def _metal_distribution(age, fpl):
+    def _metal_distribution(age, fpl, county_fips, metal_levels):
         profile_id, _ = data_access.nearest_profile_id(age, fpl)
-        df = data_access.metal_distribution(profile_id)
+        df = data_access.metal_distribution(profile_id, county_fips, metal_levels)
         if df.empty:
             return _empty_fig()
         fig = px.bar(
@@ -117,7 +129,54 @@ def register_callbacks(app):
             labels={"metal_level": "", "plan_count": "Plans available"},
         )
         fig.update_layout(margin=dict(l=10, r=10, t=10, b=10),
-                          plot_bgcolor="white", height=420, showlegend=False)
+                          plot_bgcolor="white", height=460, showlegend=False)
+        return fig
+
+    # --- full vs after-credit premium (responds to county + metal) ---------
+    @app.callback(
+        Output("credit-comparison", "figure"),
+        Input("age-slider", "value"),
+        Input("fpl-dropdown", "value"),
+        Input("county-dropdown", "value"),
+        Input("metal-dropdown", "value"),
+    )
+    def _credit_comparison(age, fpl, county_fips, metal_levels):
+        profile_id, _ = data_access.nearest_profile_id(age, fpl)
+        df = data_access.premium_vs_credit(profile_id, county_fips, metal_levels)
+        if df.empty:
+            return _empty_fig()
+        fig = px.bar(
+            df, x="metal_level", y="amount", color="kind", barmode="group",
+            color_discrete_map={"Full premium": "#2c3e50",
+                                "After credit": "#18bc9c"},
+            labels={"metal_level": "", "amount": "Median monthly ($)", "kind": ""},
+        )
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white",
+                          height=460, legend=dict(orientation="h", y=1.1))
+        return fig
+
+    # --- comparison by issuer (responds to county + metal) -----------------
+    @app.callback(
+        Output("issuer-comparison", "figure"),
+        Input("age-slider", "value"),
+        Input("fpl-dropdown", "value"),
+        Input("county-dropdown", "value"),
+        Input("metal-dropdown", "value"),
+    )
+    def _issuer_comparison(age, fpl, county_fips, metal_levels):
+        profile_id, _ = data_access.nearest_profile_id(age, fpl)
+        df = data_access.issuer_comparison(profile_id, county_fips, metal_levels)
+        if df.empty:
+            return _empty_fig()
+        df = df.sort_values("plan_count")
+        fig = px.bar(
+            df, x="plan_count", y="issuer_name", orientation="h",
+            color="median_premium", color_continuous_scale="Tealgrn",
+            labels={"plan_count": "Plans offered", "issuer_name": "",
+                    "median_premium": "Median $/mo"},
+        )
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white",
+                          height=460)
         return fig
 
     # --- plan comparison table ---------------------------------------------
@@ -130,7 +189,8 @@ def register_callbacks(app):
     )
     def _plan_table(age, fpl, county_fips, metal_levels):
         if not county_fips:
-            return html.P("Select a county to compare plans.", className="text-muted")
+            return html.P("Select a county to compare plans.",
+                          className="text-muted")
         profile_id, _ = data_access.nearest_profile_id(age, fpl)
         df = data_access.plan_comparison(profile_id, county_fips, metal_levels)
         if df.empty:

@@ -1,4 +1,4 @@
-# Marketplace Lens
+# ACA Health Plan Explorer for the Ohio Valley
 
 **An ACA health-plan price explorer for the Ohio Valley — built as a complete, reproducible data engineering pipeline.**
 
@@ -45,6 +45,11 @@ present:
   fact table keyed by (plan × county × household profile), which is what lets the
   dashboard compare like-for-like coverage across the region.
 
+- **Duplicate county names across states.** "Hamilton County" exists in both
+  Ohio and Tennessee with different FIPS codes and different plan markets. The
+  dashboard disambiguates every county by appending its state, so distinct
+  markets never collapse onto one label.
+
 - **Reproducibility.** The entire pipeline is idempotent — running it once or
   five times leaves the database in exactly the same state, via upserts on
   natural and composite keys.
@@ -72,7 +77,7 @@ command.
 | Transform | `transform/` | Flattens deeply nested responses into 6 tidy Parquet tables. |
 | Load | `db/` | Defines the schema and upserts Parquet → Postgres (idempotent). |
 | Validate | `validate/` | 8 data-quality checks, including API-vs-DB reconciliation. |
-| Dashboard | `dashboard/` | Dash app: premium-by-county, metal-level distribution, plan comparison. |
+| Dashboard | `dashboard/` | Dash app: profile builder, KPI cards, four charts, plan comparison. |
 
 ---
 
@@ -91,12 +96,88 @@ integrity checks meaningful.
 
 ---
 
+## Dashboard
+
+The Dash app is a single-page, interactive explorer for ACA plan costs across
+the Ohio Valley, built on `dash-bootstrap-components`. It reads from PostgreSQL,
+falling back to the tidy Parquet files when no database is configured — so it is
+fully demoable without a live database.
+
+### What you can do
+
+- **Build a shopper profile.** Set an age (slider) and income as a percentage of
+  the federal poverty level (dropdown). The app maps your input to the closest
+  pre-computed profile in the database and shows which one it used, so every
+  number on screen is a real stored quote rather than a live estimate.
+- **Pick a county** to focus every view on one market, or leave it to compare
+  across the region.
+- **Filter by metal level** (Bronze, Silver, Gold, Platinum) to narrow the plan
+  table.
+
+### What it shows
+
+- **Four summary cards** — plans available, median monthly premium, cheapest
+  Silver premium, and number of issuers — all reacting to the selected profile
+  and county.
+- **Median premium by county** — a ranked bar chart making geographic price
+  variation immediately visible, with each county disambiguated by state.
+- **Plans available by metal level** — the metal-tier mix for the selected
+  profile.
+- **Full vs. after-credit premium** — a grouped bar showing how much the advance
+  premium tax credit buys down the sticker price at each metal level.
+- **Comparison by issuer** — how many plans each insurer offers and their median
+  premium, so you can see which carriers compete in a given market.
+- **Plan comparison table** — every plan for the chosen profile and county side
+  by side (premium, after-credit premium, deductible, max out-of-pocket, key
+  copays), sortable in-browser.
+
+### Business insights this surfaces
+
+- **The same coverage is not the same price.** Median premiums for an identical
+  shopper swing substantially across the region — Indiana and Ohio counties
+  cluster cheapest, Tennessee in the middle, and West Virginia counties most
+  expensive — the core finding the project was built to expose.
+- **Subsidies reshape affordability.** Comparing full vs. after-credit premiums
+  shows that sticker prices overstate what most shoppers actually pay; the gap
+  widens sharply at lower incomes.
+- **Age dominates the sticker price.** Because ACA rates are age-banded, the
+  oldest profiles see full premiums several times higher than the youngest —
+  visible by sliding age and watching the cards and county chart move.
+- **Market competition varies by issuer.** Some counties are served by only a
+  couple of carriers, which the issuer view makes plain.
+
+### Running it
+
+```bash
+python -m marketplace dashboard
+```
+
+Then open **http://127.0.0.1:8050**. See **[docs/dashboard.md](docs/dashboard.md)**
+for a full usage walkthrough and instructions on stopping the server.
+
+### Screenshots
+
+<!-- Replace these placeholders with real captures before submitting. -->
+
+![Dashboard overview](docs/img/dashboard_overview.png)
+*Single-page layout: profile controls, summary cards, and the four charts.*
+
+![Full vs after-credit](docs/img/dashboard_credit.png)
+*The premium tax credit's effect on monthly cost, by metal level.*
+
+---
+
 ## Engineering decisions worth calling out
 
 - **Single source of truth.** Paths, secrets, household profiles, API settings,
-  and validation thresholds all live in `config.py`. The schema lives once in
-  `db/schema.py` and is imported everywhere (load, validation, dashboard) rather
-  than redefined.
+  and validation thresholds all live in `config.py`. The household profiles are
+  generated as a grid (ages × income bands), so widening coverage is a one-line
+  change. The schema lives once in `db/schema.py` and is imported everywhere
+  (load, validation, dashboard) rather than redefined.
+- **The dashboard never calls the API.** It reads pre-computed quotes for the
+  loaded profile grid and snaps user input to the nearest one, so it stays
+  strictly read-only against the database and can't fail on a live API call
+  during a demo.
 - **Validation as a gate, not a report.** ERROR-level failures exit non-zero and
   fail the run; WARN-level issues are surfaced without blocking. Results are
   written to Parquet for an auditable history.
@@ -143,23 +224,24 @@ dashboard server.
 | Extract / transform / load pipeline | ✅ Complete, verified against live API |
 | PostgreSQL schema + ER diagram | ✅ Complete |
 | Data-quality validation framework | ✅ Complete (8 checks) |
-| Dash dashboard | 🚧 In progress — three views scaffolded; county choropleth (FIPS + GeoJSON) still being wired in |
+| Dash dashboard | ✅ Complete (MVP) — profile builder, 4 KPI cards, 4 charts, sortable plan table |
+| County choropleth (FIPS + GeoJSON) | 💭 Planned — ranked bar conveys the same geographic comparison for now |
 | Year-over-year premium comparison | 💭 Planned (stretch) |
 
 ---
 
 ## Tech stack
 
-Python (requests · pandas · SQLAlchemy) · PostgreSQL · Parquet · Dash / Plotly · GitHub
+Python (requests · pandas · SQLAlchemy) · PostgreSQL · Parquet · Dash / Plotly · dash-bootstrap-components · GitHub
 
 ## Repository layout
 
 ```
 marketplace-lens/
 ├── pyproject.toml · requirements.txt · .env.example · README.md
-├── docs/                      # dashboard.md, erd.png, architecture diagram
+├── docs/                      # dashboard.md, erd.png, architecture diagram, img/
 ├── src/marketplace/
-│   ├── config.py              # single source of truth
+│   ├── config.py              # single source of truth (incl. generated profile grid)
 │   ├── pipeline.py            # end-to-end orchestration
 │   ├── __main__.py            # `python -m marketplace`
 │   ├── extract/               # api_client.py, plans.py
@@ -174,5 +256,3 @@ marketplace-lens/
 ```
 
 ---
-
-*Built for MSBA 692 — Pipelines to Insights, University of Louisville.*
