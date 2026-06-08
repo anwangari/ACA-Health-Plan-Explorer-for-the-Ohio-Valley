@@ -66,28 +66,41 @@ TARGET_ZIPS = {
 # reflects the market, not the household. This is the ONE place profiles live;
 # extract derives the API "people" payload from it, transform writes the flat
 # columns to the query_profiles table.
-HOUSEHOLD_PROFILES = [
-    {
-        "profile_id": "single_40_250fpl",
-        "age": 40,
-        "income": 37650,          # ~250% FPL for a household of 1
-        "fpl_percent": 250,
-        "gender": "Male",
-        "uses_tobacco": False,
-        "household_size": 1,
-        "aptc_eligible": True,
-    },
-    {
-        "profile_id": "single_27_400fpl",
-        "age": 27,
-        "income": 60240,          # ~400% FPL for a household of 1
-        "fpl_percent": 400,
-        "gender": "Female",
-        "uses_tobacco": False,
-        "household_size": 1,
-        "aptc_eligible": True,
-    },
-]
+#
+# Profiles are GENERATED as a grid (ages x FPL bands) rather than hand-listed,
+# so the dashboard can let a user dial in an age/income and snap to the nearest
+# stored profile. To widen coverage, add values to PROFILE_AGES or
+# PROFILE_FPL_BANDS and re-run the pipeline once -- nothing else changes.
+#
+# Current grid: 5 ages x 3 FPL bands = 15 profiles. household size fixed at 1,
+# tobacco off, to keep the one-time extract tractable.
+
+PROFILE_AGES = [25, 35, 45, 55, 64]
+PROFILE_FPL_BANDS = [150, 250, 400]
+
+# 2025 federal poverty level for a household of 1 (used to derive income from
+# an FPL band). Roughly $15,060; income = FPL% x that.
+FPL_BASE_HH1 = 15060
+
+
+def _build_profiles():
+    profiles = []
+    for age in PROFILE_AGES:
+        for fpl in PROFILE_FPL_BANDS:
+            profiles.append({
+                "profile_id": f"single_{age}_{fpl}fpl",
+                "age": age,
+                "income": round(FPL_BASE_HH1 * fpl / 100),
+                "fpl_percent": fpl,
+                "gender": "Male",
+                "uses_tobacco": False,
+                "household_size": 1,
+                "aptc_eligible": True,
+            })
+    return profiles
+
+
+HOUSEHOLD_PROFILES = _build_profiles()
 
 # Columns persisted to the query_profiles table (drops API-only keys).
 PROFILE_TABLE_COLUMNS = [

@@ -2,11 +2,17 @@
 data_access.py
 ==============
 The ONLY module in the dashboard that touches data. Everything here returns a
-pandas DataFrame ready for plotting; layouts and callbacks stay presentation-only.
+pandas DataFrame (or a small dict/scalar for KPIs) ready for presentation;
+layouts and callbacks stay presentation-only.
 
 It reads from PostgreSQL when DATABASE_URL is set, and otherwise falls back to
 the tidy Parquet files so the dashboard is demoable without a live database.
-Table objects are imported from db.schema — never redefined here.
+Table objects are imported from db.schema -- never redefined here.
+
+The dashboard lets a user dial in an age and income band; rather than hitting
+the API live, we snap that request to the NEAREST profile already stored in the
+database (see nearest_profile_id). This keeps the dashboard strictly read-only
+against the loaded data.
 """
 
 import pandas as pd
@@ -42,20 +48,60 @@ def _read_table(name, table):
 
 
 # ---------------------------------------------------------------------------
-# Lookups for filter controls
+# Profile grid: bounds for the input controls + snap-to-nearest lookup
 # ---------------------------------------------------------------------------
 
-def list_profiles():
-    """profile_id + a human label for the profile dropdown."""
+def profile_grid():
+    """The stored profiles as a DataFrame (age, fpl_percent, income, id)."""
     df = _read_table("query_profiles", query_profiles)
-    if df.empty:
-        return df
-    df["label"] = df.apply(
-        lambda r: f"Age {r['age']}, {int(r['fpl_percent'])}% FPL ({r['gender']})",
-        axis=1,
-    )
-    return df[["profile_id", "label"]]
+    return df
 
+
+def profile_bounds():
+    """Min/max age and the available FPL bands, to configure the controls."""
+    df = profile_grid()
+    if df.empty:
+        return {"age_min": 25, "age_max": 64, "fpl_bands": [150, 250, 400]}
+    return {
+        "age_min": int(df["age"].min()),
+        "age_max": int(df["age"].max()),
+        "fpl_bands": sorted(df["fpl_percent"].dropna().unique().astype(int).tolist()),
+    }
+
+
+def nearest_profile_id(age, fpl_percent):
+    """
+    Map a user-requested (age, fpl) to the closest stored profile_id.
+
+    Age and FPL live on different scales, so we normalize each by its grid
+    span before measuring distance -- otherwise income (hundreds of %) would
+    swamp age (tens of years). Returns (profile_id, snapped_row_as_dict).
+    """
+    df = profile_grid()
+    if df.empty:
+        return None, {}
+
+    age_span = max(df["age"].max() - df["age"].min(), 1)
+    fpl_span = max(df["fpl_percent"].max() - df["fpl_percent"].min(), 1)
+
+    d = (((df["age"] - age) / age_span) ** 2 +
+         ((df["fpl_percent"] - fpl_percent) / fpl_span) ** 2)
+    row = df.loc[d.idxmin()]
+    return row["profile_id"], row.to_dict()
+
+
+def profile_label(row):
+    """Human label for a snapped profile row (dict)."""
+    if not row:
+        return ""
+    return (f"Age {int(row['age'])}, "
+            f"{int(row['fpl_percent'])}% FPL "
+            f"(~${int(row['income']):,}/yr)")
+
+
+# ---------------------------------------------------------------------------
+# Lookups for filter controls
+# ---------------------------------------------------------------------------
 
 def list_metal_levels():
     df = _read_table("plans", plans)
@@ -65,7 +111,51 @@ def list_metal_levels():
 
 
 # ---------------------------------------------------------------------------
-# View 1: premium choropleth — median premium per county for a given profile
+# KPI summary metrics (react to selected profile + optional county)
+# ---------------------------------------------------------------------------
+
+def kpi_summary(profile_id, county_fips=None):
+    """
+    Headline numbers for the metric cards. Scoped to a profile, and to a single
+    county when one is selected (else the whole region).
+
+    Returns a dict of display-ready strings so the cards stay presentation-only.
+    """
+    quotes = _read_table("premium_quotes", premium_quotes)
+    plan_df = _read_table("plans", plans)
+    blank = {"plans": "--", "median": "--", "cheapest_silver": "--", "issuers": "--"}
+    if quotes.empty or plan_df.empty:
+        return blank
+
+    q = quotes[quotes["profile_id"] == profile_id]
+    if county_fips:
+        q = q[q["county_fips"] == county_fips]
+    if q.empty:
+        return blank
+
+    merged = q.merge(
+        plan_df[["plan_id", "metal_level", "issuer_id"]], on="plan_id", how="left"
+    )
+
+    n_plans = merged["plan_id"].nunique()
+    median_prem = merged["monthly_premium"].median()
+    n_issuers = merged["issuer_id"].nunique()
+
+    silver = merged[merged["metal_level"] == "Silver"]
+    cheapest_silver = silver["monthly_premium"].min() if not silver.empty else None
+
+    return {
+        "plans": f"{n_plans:,}",
+        "median": f"${median_prem:,.0f}" if pd.notnull(median_prem) else "--",
+        "cheapest_silver": (f"${cheapest_silver:,.0f}"
+                            if cheapest_silver is not None and pd.notnull(cheapest_silver)
+                            else "--"),
+        "issuers": f"{n_issuers:,}",
+    }
+
+
+# ---------------------------------------------------------------------------
+# View 1: median premium per county for a given profile
 # ---------------------------------------------------------------------------
 
 def premium_by_county(profile_id):
