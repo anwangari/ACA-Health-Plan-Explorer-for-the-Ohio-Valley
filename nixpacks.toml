@@ -1,0 +1,19 @@
+# Railway uses Nixpacks to build the image. Your package lives under src/ and is
+# imported as `marketplace`, so it must be installed (editable) for both the
+# release command (`python seed.py` -> imports marketplace) and the web command
+# (gunicorn marketplace.dashboard.app:server). The default Nixpacks Python flow
+# installs requirements.txt but does NOT run `pip install -e .`, so we add it.
+
+[phases.setup]
+nixPkgs = ["python311", "gcc"]
+
+[phases.install]
+cmds = [
+  "python -m venv --copies /opt/venv",
+  ". /opt/venv/bin/activate && pip install --upgrade pip",
+  ". /opt/venv/bin/activate && pip install -r requirements.txt",
+  ". /opt/venv/bin/activate && pip install -e ."
+]
+
+[start]
+cmd = "gunicorn marketplace.dashboard.app:server --bind 0.0.0.0:$PORT --workers 2 --timeout 120"

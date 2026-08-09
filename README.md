@@ -1,97 +1,270 @@
-# Marketplace Lens — ACA Health Plan Explorer for the Ohio Valley
+# Marketplace Lens: ACA Health Plan Explorer for the Ohio Valley
 
-An end-to-end data engineering pipeline that pulls individual health-insurance
-plan data from the **CMS Marketplace API**, loads it into a normalized
-**PostgreSQL** database, validates it, and (Week 4) serves it through an
-interactive **Dash** dashboard. Built for MSBA 692 — Pipelines to Insights.
+**An ACA health-plan price explorer for the Ohio Valley — built as a complete, reproducible data engineering pipeline.**
 
-The project answers one question: **how does the cost of the same coverage vary
-across counties in the Ohio Valley region?**
+![Python](https://img.shields.io/badge/Python-3.10+-blue)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-relational-336791)
+![Dash](https://img.shields.io/badge/Dash-Plotly-1f77b4)
+![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0-red)
 
-## Scope
+Marketplace Lens pulls individual health-insurance plan data from the federal
+**CMS Marketplace API**, normalizes it into a **PostgreSQL** database, validates
+it against a documented set of data-quality checks, and serves it through an
+interactive **Dash** dashboard.
 
-Covers HealthCare.gov states **Indiana, Ohio, Tennessee, and West Virginia**.
-Kentucky (kynect) and Virginia run their own state exchanges and are not served
-by the federal API, so they are intentionally excluded.
+It exists to answer one concrete question:
 
-## Tech stack
+> **How does the cost of the same coverage vary from county to county across the Ohio Valley — and which plan is actually the best value?**
 
-Python (requests, pandas, SQLAlchemy) · PostgreSQL · Parquet · Dash/Plotly · GitHub
+The identical plan is priced differently depending on where you live and who is
+shopping, and the cheapest premium is rarely the cheapest *total* cost.
+Marketplace Lens makes both of those things visible — and makes the data behind
+them trustworthy and reproducible.
 
-## Pipeline
+---
+
+## Key Technical Challenges
+
+A few problems had to be solved for the numbers to be correct rather than just
+present:
+
+- **Silent pagination truncation.** The CMS API returns only 10 plans per
+  county by default, sorted cheapest-first. Taken at face value, this skewed the
+  data toward Bronze plans (~88% in early runs) and produced a completely
+  unrepresentative market. The extractor pages through the full reported `total`
+  for every query, and a headline validation check reconciles loaded plan counts
+  against that `total` to guarantee nothing was dropped between the API and the
+  database.
+
+- **Scoping to what the federal API actually serves.** Kentucky (kynect) and
+  Virginia run their own state exchanges and aren't available through the federal
+  API. They're deliberately excluded; the project covers the four HealthCare.gov
+  states in the region — **Indiana, Ohio, Tennessee, and West Virginia**.
+
+- **Duplicate county names across states.** "Hamilton County" exists in both
+  Ohio and Tennessee with different FIPS codes and different plan markets. Every
+  county is disambiguated by appending its state, so distinct markets never
+  collapse onto one bar.
+
+- **Keeping prices honest across geography.** Premiums genuinely differ by
+  county *and* by shopper, so they can't live on the plan record. They sit in a
+  fact table keyed by (plan x county x household profile), which is what lets the
+  dashboard compare like-for-like coverage across the region.
+
+- **Reproducibility.** The entire pipeline is idempotent — running it once or
+  five times leaves the database in exactly the same state, via upserts on
+  natural and composite keys.
+
+---
+
+## Architecture
 
 ```
 CMS Marketplace API
-   └─ extract.py     pull plans per county × household profile → raw_cache/*.json
-        └─ transform.py   flatten JSON → tidy/*.parquet (6 tables)
-             └─ load.py        upsert Parquet → PostgreSQL (idempotent)
-                  └─ validate.py    run data-quality checks → tidy/validation_results.parquet
+   |- extract     pull plans per county x household profile -> data/raw_cache/*.json
+       |- transform   flatten nested JSON -> data/tidy/*.parquet (6 tables)
+           |- load        upsert Parquet -> PostgreSQL (idempotent)
+               |- validate    8 data-quality checks -> validation_results.parquet
+                   |- dashboard   interactive Dash/Plotly app over the loaded data
 ```
 
-| File | Role |
-|------|------|
-| `extract.py` | Calls the API with pagination; caches raw JSON. |
-| `transform.py` | Flattens responses into 6 tidy Parquet tables. |
-| `load.py` | Builds the schema, loads Parquet → Postgres, **and orchestrates the full run.** |
-| `validate.py` | Data Quality & Validation Framework (19 checks, incl. API-vs-DB reconciliation). |
+Each stage is an importable module with a single responsibility;
+`pipeline.py` orchestrates them end to end, and the whole run is driven from one
+command.
 
-## Setup
+| Stage | Module | What it does |
+|-------|--------|--------------|
+| Extract | `extract/` | Calls the API with retry/backoff, rate limiting, and full pagination; caches raw JSON. |
+| Transform | `transform/` | Flattens deeply nested responses into 6 tidy Parquet tables. |
+| Load | `db/` | Defines the schema and upserts Parquet -> Postgres (idempotent). |
+| Validate | `validate/` | 8 data-quality checks, including API-vs-DB reconciliation. |
+| Dashboard | `dashboard/` | Dash app: profile builder, 5 KPI cards, 4 charts, plan comparison. |
 
-```bash
-# 1. Install dependencies
-pip install requests pandas pyarrow sqlalchemy psycopg2-binary dotenv
-
-# 2. Get a free API key: https://developer.cms.gov/marketplace-api/key-request.html
-export MARKETPLACE_API_KEY="your_key_here"
-
-# 3. Point at your PostgreSQL instance
-export DATABASE_URL="postgresql+psycopg2://user:password@localhost:5432/marketplace"
-```
-
-## Run
-
-```bash
-python load.py               # full pipeline: extract → transform → load → validate
-python load.py --no-extract  # reuse cached JSON (fast reruns, skips the API pull)
-```
-
-Each stage can also run on its own: `python extract.py`, `python transform.py`,
-`python validate.py`. The run is **idempotent** — running it five times leaves
-the database in the same state.
+---
 
 ## Data model
 
-Six tables, normalized to third normal form. `premium_quotes` is the fact table
-at the center (grain: one row per plan × county × profile); `counties`,
-`query_profiles`, `issuers`, `plans`, and `plan_benefits` describe it. Foreign
-keys are enforced in PostgreSQL. 
+Six tables in third normal form, with foreign keys enforced in PostgreSQL.
+`premium_quotes` is the fact table at the center (grain: one row per plan x
+county x household profile); `counties`, `query_profiles`, `issuers`, `plans`,
+and `plan_benefits` describe it.
 
-## ER Diagram
-![ER Diagram from postgres](docs/erd.png)
+![ER diagram](docs/erd.png)
 
-## Validation
+Splitting fixed plan attributes from county/shopper-dependent prices keeps every
+fact in exactly one place and is what makes the reconciliation and referential-
+integrity checks meaningful.
 
-`validate.py` checks completeness, value ranges, referential integrity, and
-benefit-field coverage. Its headline check reconciles plans loaded in the DB
-against the `total` each API response reported — this catches silent pagination
-truncation. The run fails (exit code 1) on any ERROR-level check.
+---
 
-## Next steps
+## Dashboard
 
-- [ ] Build Dash application (Week 4): premium maps, metal-level distributions, side-by-side plan comparison.
-- [ ] Embed the exported ER and architecture diagrams in `docs/`.
-- [ ] Expand `TARGET_ZIPS` for broader county coverage.
-- [ ] (Stretch) Year-over-year premium comparison using the API's multi-year retention.
+A single-page, interactive explorer built on `dash-bootstrap-components`
+(FLATLY theme), capped at a 1200px content width for readability. It reads from
+PostgreSQL, falling back to the tidy Parquet files when no database is
+configured — so it is fully demoable without a live database.
+
+### What you can do
+
+- **Build a shopper profile.** Set an age (slider) and income as a percentage
+  of the federal poverty level (dropdown). The app maps your input to the
+  closest pre-computed profile in the database and shows which one it used, so
+  every number on screen is a real stored quote rather than a live estimate.
+- **Pick a county** to focus the supporting charts and the plan table on one
+  market, or leave it on "All counties" to compare across the region.
+- **Filter by metal level** (Bronze, Silver, Gold, Platinum) to narrow every
+  view.
+
+### What it shows
+
+**Five summary cards**, each with a one-line description, reacting to the
+selected profile and county: plans available, median premium, cheapest Silver,
+cheapest Silver after credit, and the best-value plan's estimated annual cost.
+
+**Four charts in a 2x2 grid:**
+
+- **Median premium by county** — a ranked bar chart of every county
+  (disambiguated by state) so geographic price variation is visible at a glance.
+  It responds to the metal filter, and selecting a county highlights that bar in
+  context rather than hiding the rest.
+- **Plans available by metal level** — the metal-tier mix for the current
+  selection, responsive to county and metal filters.
+- **Premium vs. deductible** — one dot per plan: after-credit premium against
+  individual deductible, colored *and* shaped by metal level using a
+  colorblind-safe (Okabe-Ito) palette. Best-value plans sit toward the
+  bottom-left; cheap-premium / high-deductible "traps" sit top-left.
+- **Estimated annual cost** — `premium x 12 + deductible` per plan, ranked
+  cheapest first. Illustrative (it assumes you meet the deductible), and the
+  label says so.
+
+**Plan comparison table** — every plan for the chosen profile and county side by
+side (premium, after-credit premium, deductible, max out-of-pocket, key copays),
+sortable in-browser.
+
+### Business insights this surfaces
+
+- **The same coverage is not the same price.** Median premiums for an identical
+  shopper rise steadily across the region — Indiana and Ohio counties cluster
+  cheapest, Tennessee in the middle, and West Virginia counties most expensive.
+- **Cheapest premium is not best value.** The premium-vs-deductible scatter and
+  the annual-cost chart together show that a low-premium Bronze plan with a high
+  deductible often costs more over a year than a pricier Silver or Gold plan
+  once expected out-of-pocket spending is included.
+- **Subsidies reshape affordability.** The after-credit figures show that
+  sticker prices overstate what most shoppers actually pay; the gap is largest
+  at lower incomes.
+- **Age dominates the sticker price.** Because ACA rates are age-banded, the
+  oldest profiles see full premiums several times higher than the youngest —
+  visible by sliding age and watching the cards and charts move.
+
+### Running it
+
+```bash
+python -m marketplace dashboard
+```
+
+Then open **http://127.0.0.1:8050**. See **[docs/dashboard.md](docs/dashboard.md)**
+for a full usage walkthrough and instructions on stopping the server.
+
+### Screenshots
+
+<!-- Replace these placeholders with real captures before submitting. -->
+
+![Dashboard overview](docs/img/dashboard_overview.png)
+*Profile controls, the five summary cards, and the 2x2 chart grid.*
+
+![Best-value views](docs/img/dashboard_value.png)
+*Premium-vs-deductible scatter and estimated annual cost — finding the best deal.*
+
+---
+
+## Engineering decisions worth calling out
+
+- **Single source of truth.** Paths, secrets, household profiles, API settings,
+  and validation thresholds all live in `config.py`. The household profiles are
+  generated as a grid (ages x income bands), so widening coverage is a one-line
+  change. The schema lives once in `db/schema.py` and is imported everywhere
+  (load, validation, dashboard) rather than redefined.
+- **The dashboard never calls the API.** It reads pre-computed quotes for the
+  loaded profile grid and snaps user input to the nearest one, so it stays
+  strictly read-only against the database and can't fail on a live API call
+  during a demo.
+- **One data module.** `dashboard/data_access.py` is the only place the
+  dashboard touches data; layouts and callbacks stay presentation-only. Numeric
+  columns are coerced on read so medians and sorts are never thrown off by
+  string-typed values.
+- **Validation as a gate, not a report.** ERROR-level failures exit non-zero and
+  fail the run; WARN-level issues are surfaced without blocking. Results are
+  written to Parquet for an auditable history.
+- **Accessibility.** The plan scatter encodes metal level by both color and
+  marker shape using a colorblind-safe palette, so it stays readable for all
+  types of color vision deficiency and even in grayscale.
+
+---
+
+## Quick start
+
+```bash
+# 1. Install the package and dependencies
+pip install -e .
+
+# 2. Configure secrets
+cp .env.example .env
+#    Then edit .env:
+#    MARKETPLACE_API=your_key_here          (free key: https://developer.cms.gov/marketplace-api/key-request.html)
+#    DATABASE_URL=postgresql+psycopg2://user:password@localhost:5432/marketplace
+
+# 3. Run the full pipeline (extract -> transform -> load -> validate)
+python -m marketplace
+
+# Reuse cached API responses for fast reruns
+python -m marketplace --no-extract
+
+# Launch the dashboard
+python -m marketplace dashboard
+```
+
+Individual stages run on their own too:
+`python -m marketplace {extract|transform|load|validate}`.
+
+---
+
+## Project status
+
+| Component | Status |
+|-----------|--------|
+| Extract / transform / load pipeline | Complete, verified against live API |
+| PostgreSQL schema + ER diagram | Complete |
+| Data-quality validation framework | Complete (8 checks) |
+| Dash dashboard | Complete (MVP) — profile builder, 5 KPI cards, 4 charts, sortable plan table |
+| County choropleth (FIPS + GeoJSON) | Planned — ranked bar conveys the same geographic comparison for now |
+| Year-over-year premium comparison | Planned (stretch) |
+
+---
+
+## Tech stack
+
+Python (requests, pandas, SQLAlchemy), PostgreSQL, Parquet, Dash / Plotly, dash-bootstrap-components, GitHub
 
 ## Repository layout
 
 ```
-.
-├── extract.py
-├── transform.py
-├── load.py
-├── validate.py
-├── raw_cache/          # cached API responses (generated)
-├── tidy/               # Parquet tables + validation results (generated)
-└── docs/               # proposal, schema writeup, diagrams
+marketplace-lens/
+|- pyproject.toml, requirements.txt, .env.example, README.md
+|- docs/                      # dashboard.md, erd.png, architecture diagram, img/
+|- src/marketplace/
+|  |- config.py               # single source of truth (incl. generated profile grid)
+|  |- pipeline.py             # end-to-end orchestration
+|  |- __main__.py             # python -m marketplace
+|  |- extract/                # api_client.py, plans.py
+|  |- transform/              # helpers.py, tables.py
+|  |- db/                     # schema.py, load.py
+|  |- validate/               # checks.py, runner.py
+|  |- dashboard/              # app.py, data_access.py, layouts.py, callbacks.py
+|- data/                      # generated artifacts (gitignored)
+|  |- raw_cache/              # cached API responses
+|  |- tidy/                   # Parquet tables + validation results
+|- tests/test_smoke.py
 ```
+
+---

@@ -3,5 +3,14 @@
 .env.*
 !.env.example
 notes.txt
+CLAUDE.md
 
+# Python build / cache / test artifacts
 __pycache__
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+/data/*
+.mailmap
