@@ -9,13 +9,8 @@ python-dotenv>=1.0
 # Dashboard
 dash>=2.17
 plotly>=5.22
+dash-bootstrap-components>=1.6
+gunicorn>=22.0
 
 # Tests
 pytest>=8.0
-
-requests
-pandas
-pyarrow
-sqlalchemy
-psycopg2-binary
-python-dotenv
